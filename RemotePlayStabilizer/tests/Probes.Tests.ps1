@@ -33,6 +33,35 @@ Describe 'Write-SessionLog' {
     }
 }
 
+Describe 'Start-ProbeAsync / Get-ProbeResult' {
+    It 'completes with a number for loopback' {
+        $t = Start-ProbeAsync -Target '127.0.0.1' -TimeoutMs 500
+        $t.Task.Wait(2000) | Out-Null
+        $r = Get-ProbeResult -Probe $t
+        $r.Done | Should Be $true
+        ($r.Rtt -ge 0) | Should Be $true
+    }
+    It 'completes with a null RTT for an unresolvable host' {
+        $t = Start-ProbeAsync -Target 'no-such-host.invalid' -TimeoutMs 100
+        try { $t.Task.Wait(3000) | Out-Null } catch { }
+        $r = Get-ProbeResult -Probe $t
+        $r.Done | Should Be $true
+        $r.Rtt | Should Be $null
+    }
+}
+
+Describe 'Select-Ps5Candidate' {
+    It 'picks the first private address that is not excluded' {
+        Select-Ps5Candidate -Addresses @('8.8.8.8', '10.86.1.1', '10.86.1.57', '192.168.0.9') -Exclude @('10.86.1.1') | Should Be '10.86.1.57'
+    }
+    It 'ignores loopback, link-local, public and IPv6 addresses' {
+        Select-Ps5Candidate -Addresses @('127.0.0.1', '169.254.3.4', '8.8.8.8', '::1', 'fe80::1') -Exclude @() | Should Be $null
+    }
+    It 'returns null for no addresses' {
+        Select-Ps5Candidate -Addresses @() -Exclude @() | Should Be $null
+    }
+}
+
 Describe 'Send-Probe' {
     It 'returns null instead of throwing for an unresolvable target' {
         { Send-Probe -Target 'no-such-host.invalid' -TimeoutMs 100 } | Should Not Throw

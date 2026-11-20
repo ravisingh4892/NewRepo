@@ -264,6 +264,49 @@ function Send-Probe {
     }
 }
 
+# Non-blocking probes for the UI: start one, collect it on a later tick.
+function Start-ProbeAsync {
+    param([string]$Target, [int]$TimeoutMs = 150)
+    $ping = New-Object System.Net.NetworkInformation.Ping
+    $task = $null
+    try { $task = $ping.SendPingAsync($Target, $TimeoutMs) } catch { $ping.Dispose() }
+    [pscustomobject]@{ Ping = $ping; Task = $task }
+}
+
+function Get-ProbeResult {
+    param($Probe)
+    if ($null -eq $Probe.Task) { return [pscustomobject]@{ Done = $true; Rtt = $null } }
+    if (-not $Probe.Task.IsCompleted) { return [pscustomobject]@{ Done = $false; Rtt = $null } }
+    $rtt = $null
+    if ($Probe.Task.Status -eq 'RanToCompletion') {
+        $reply = $Probe.Task.Result
+        if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) { $rtt = [double]$reply.RoundtripTime }
+    }
+    try { $Probe.Ping.Dispose() } catch { }
+    [pscustomobject]@{ Done = $true; Rtt = $rtt }
+}
+
+function Select-Ps5Candidate {
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Addresses, [AllowNull()][AllowEmptyCollection()][string[]]$Exclude)
+    foreach ($a in @($Addresses)) {
+        if (-not $a -or $a -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { continue }
+        if (@($Exclude) -contains $a) { continue }
+        if ($a -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)') { return $a }
+    }
+    return $null
+}
+
+function Find-Ps5Ip {
+    param([string]$ProcessName = 'RemotePlay')
+    $procs = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) { return $null }
+    $addrs = @()
+    foreach ($p in $procs) {
+        $addrs += @(Get-NetTCPConnection -OwningProcess $p.Id -State Established -ErrorAction SilentlyContinue | ForEach-Object { $_.RemoteAddress })
+    }
+    Select-Ps5Candidate -Addresses $addrs -Exclude @(Get-GatewayIp)
+}
+
 function Write-SessionLog {
     param([string]$Path, [hashtable]$Entry)
     $dir = Split-Path $Path
@@ -275,4 +318,5 @@ function Write-SessionLog {
 
 Export-ModuleMember -Function Get-WindowStats, Test-Freeze, Get-Cause, Get-Verdict,
     Get-StatePath, Test-IsAdmin, ConvertFrom-PowercfgQuery, Invoke-TunerApply, Invoke-TunerRevert, Test-TunerDirty,
-    ConvertFrom-NetshWlan, Get-WifiRssi, Get-GatewayIp, Send-Probe, Write-SessionLog
+    ConvertFrom-NetshWlan, Get-WifiRssi, Get-GatewayIp, Send-Probe, Write-SessionLog,
+    Start-ProbeAsync, Get-ProbeResult, Select-Ps5Candidate, Find-Ps5Ip
