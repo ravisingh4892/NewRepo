@@ -42,14 +42,37 @@ function Get-Verdict {
     param([AllowNull()][AllowEmptyCollection()][object[]]$Events)
     $ev = @($Events | Where-Object { $null -ne $_ })
     if ($ev.Count -eq 0) { return 'No freezes recorded this session.' }
-    $top = ($ev | Group-Object Cause | Sort-Object Count -Descending | Select-Object -First 1).Name
-    $n = $ev.Count
-    switch ($top) {
-        'PS5-LINK' { return "$n freezes. PS5 link is the weak point; use a cable or move it closer to the router." }
-        'PC-WIFI-WEAK' { return "$n freezes. Your PC's Wi-Fi link is weak. Software cannot fix a weak radio link: move closer to the router or use a cable." }
-        'ROUTER-OR-INTERNET' { return "$n freezes. The router or your internet connection is the weak point; try restarting the router or changing its channel." }
-        default { return "$n freezes, but the cause could not be pinned down." }
+    $stalls = @($ev | Where-Object { $_.PSObject.Properties['Severity'] -and $_.Severity -eq 'STALL' })
+    $blips = $ev.Count - $stalls.Count
+    $s = if ($stalls.Count -eq 1) { '' } else { 's' }
+    $b = if ($blips -eq 1) { '' } else { 's' }
+    $counts = if ($stalls.Count -gt 0) { "$($stalls.Count) stall$s, $blips minor blip$b." } else { "No real stalls, $blips minor blip$b." }
+    # A real stall decides the diagnosis; many harmless blips must not outvote it.
+    $basis = if ($stalls.Count -gt 0) { $stalls } else { $ev }
+    $top = ($basis | Group-Object Cause | Sort-Object Count -Descending | Select-Object -First 1).Name
+    $advice = switch ($top) {
+        'PS5-LINK' { "The PS5's own Wi-Fi leg is the weak point (your PC-to-router link tested clean). Best fixes: put a cable on the PS5, set the PS5 to 5 GHz (Settings > Network > Settings > Wi-Fi Frequency Band), or lower Remote Play to 720p / Standard frame rate." }
+        'PC-WIFI-WEAK' { "Your PC's Wi-Fi link is weak. Software cannot fix a weak radio link: move closer to the router or use a cable." }
+        'ROUTER-OR-INTERNET' { "The router or your internet connection is the weak point; try restarting the router or changing its channel." }
+        default { "The cause could not be pinned down." }
     }
+    return "$counts $advice"
+}
+
+function Get-Severity {
+    param($Stats)
+    if ($null -eq $Stats -or -not (Test-Freeze $Stats)) { return $null }
+    if ($Stats.Loss -ge 0.15 -or $Stats.Jitter -gt 60) { return 'STALL' }
+    return 'BLIP'
+}
+
+function Get-LinkGrade {
+    param([int]$Sent, [int]$Lost)
+    if ($Sent -lt 150) { return $null }   # about 30 s of samples
+    $loss = $Lost / $Sent
+    if ($loss -lt 0.005) { return 'GOOD' }
+    if ($loss -lt 0.02) { return 'MARGINAL' }
+    return 'POOR'
 }
 
 # ---------- Reversible tuner (Task 2) ----------
@@ -325,7 +348,7 @@ function Write-SessionLog {
     ($e | ConvertTo-Json -Compress) | Add-Content -Path $Path -Encoding UTF8
 }
 
-Export-ModuleMember -Function Get-WindowStats, Test-Freeze, Get-Cause, Get-Verdict,
+Export-ModuleMember -Function Get-WindowStats, Test-Freeze, Get-Cause, Get-Verdict, Get-Severity, Get-LinkGrade,
     Get-StatePath, Test-IsAdmin, ConvertFrom-PowercfgQuery, Invoke-TunerApply, Invoke-TunerRevert, Test-TunerDirty,
     ConvertFrom-NetshWlan, Get-WifiRssi, Get-GatewayIp, Send-Probe, Write-SessionLog,
     Start-ProbeAsync, Get-ProbeResult, Select-Ps5Candidate, Find-Ps5Ip

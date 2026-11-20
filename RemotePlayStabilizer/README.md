@@ -29,7 +29,9 @@ Every 200 ms it pings your router, your PS5 and the internet (1.1.1.1), and read
 - `PS5-LINK`: the router probe is clean but the PS5 probe is bad. The PS5 and internet probes cross your PC's Wi-Fi too, so a clean router probe clears the PC link.
 - `ROUTER-OR-INTERNET`: only the internet probe is bad.
 
-When Remote Play closes you get a plain-language verdict (also under **Show verdict**).
+Freezes are graded. A **stall** is real trouble (15% or more of the last 5 seconds' pings lost, or jitter over 60 ms) and gets the red banner and a balloon. Anything smaller is a **minor blip** (for example 2 lost pings) and is only logged and counted, since it rarely interrupts play. The **Link grade** row shows running loss for the router and PS5 (GOOD under 0.5%, MARGINAL under 2%, POOR above), and the window adds a tip when the PS5 link is not GOOD.
+
+When Remote Play closes you get a plain-language verdict (also under **Show verdict**) that counts stalls and blips separately and gives PS5-specific fixes (cable, 5 GHz band, 720p / Standard frame rate).
 
 ## The honest limit
 

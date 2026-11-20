@@ -17,7 +17,8 @@ $MinSamples = 15
 $AllActions = @('PowerSaving', 'ProcessPriority', 'PauseHogs', 'Qos')
 
 # ---------- single instance: a second copy would revert the first one's live tuning ----------
-$script:mutex = New-Object System.Threading.Mutex($false, 'Local\RemotePlayStabilizerSingleton')
+$mutexName = if ($SmokeSeconds -gt 0) { 'Local\RemotePlayStabilizerSmoke' } else { 'Local\RemotePlayStabilizerSingleton' }
+$script:mutex = New-Object System.Threading.Mutex($false, $mutexName)
 $owned = $false
 try { $owned = $script:mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
 if (-not $owned) {
@@ -65,12 +66,17 @@ $script:netshProc = $null; $script:netshTask = $null
 $script:session = $false; $script:events = @(); $script:lastEvent = [datetime]::MinValue
 $script:tuneText = ''; $script:freezeText = ''; $script:freezeUntil = [datetime]::MinValue
 $script:ticks = 0; $script:samples = @{ Router = 0; Ps5 = 0; Internet = 0 }
+$script:total = @{}   # running sent/lost counts since the tool started (drives the link grade)
+foreach ($n in $Names) { $script:total[$n] = @{ Sent = 0; Lost = 0 } }
+$script:stalls = 0; $script:blips = 0; $script:tip = ''
 
 function Add-Sample($name, $rtt) {
     $l = $script:win[$name]
     $l.Add($rtt)
     if ($l.Count -gt $WindowSize) { $l.RemoveAt(0) }
     $script:samples[$name]++
+    $script:total[$name].Sent++
+    if ($null -eq $rtt) { $script:total[$name].Lost++ }
 }
 
 function Get-Stats($name) {
@@ -91,7 +97,7 @@ function Set-Ps5Address($ip) {
 # ---------- UI ----------
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Remote Play Stabilizer'
-$form.Size = New-Object System.Drawing.Size(500, 470)
+$form.Size = New-Object System.Drawing.Size(500, 520)
 $form.StartPosition = 'CenterScreen'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $form.FormBorderStyle = 'FixedSingle'; $form.MaximizeBox = $false
@@ -116,6 +122,9 @@ foreach ($n in $Names) {
 }
 [void](New-Lbl 'Wi-Fi signal' 16 $rowY 120)
 $ui['Rssi'] = New-Lbl 'n/a' $cols[0] $rowY 300
+$rowY += 30
+[void](New-Lbl 'Link grade' 16 $rowY 120)
+$ui['Grade'] = New-Lbl 'measuring...' $cols[0] $rowY 330
 $rowY += 40
 
 [void](New-Lbl 'PS5 IP address' 16 $rowY 120)
@@ -171,16 +180,18 @@ function Update-Status {
         $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
         $lblDetail.Text = $script:tuneText
     } else {
-        $lblStatus.Text = 'Remote Play running - monitoring'
+        $lblStatus.Text = "Remote Play running - stalls: $($script:stalls), minor blips: $($script:blips)"
         $lblStatus.ForeColor = [System.Drawing.SystemColors]::ControlText
         $lblDetail.Text = $script:tuneText
     }
+    if ($script:session -and $script:tip) { $lblDetail.Text = $lblDetail.Text + "`n" + $script:tip }
     $t = $lblStatus.Text; if ($t.Length -gt 60) { $t = $t.Substring(0, 60) }
     $notify.Text = $t
 }
 
 function Start-Session {
     $script:session = $true; $script:events = @(); $script:lastEvent = [datetime]::MinValue
+    $script:stalls = 0; $script:blips = 0
     $r = Invoke-TunerApply -Actions $AllActions
     $text = 'Applied: ' + $(if (@($r.Applied).Count) { @($r.Applied) -join ', ' } else { 'nothing' })
     if (@($r.Skipped).Count) { $text += "`nSkipped (need admin or not available): " + (@($r.Skipped) -join ', ') }
@@ -193,7 +204,9 @@ function Stop-Session {
     $script:session = $false
     $verdict = Get-Verdict -Events $script:events
     $script:tuneText = "Settings restored. Last session: $verdict"
-    Write-SessionLog -Path $LogPath -Entry @{ Event = 'session-end'; Freezes = @($script:events).Count; Verdict = $verdict }
+    $entry = @{ Event = 'session-end'; Freezes = @($script:events).Count; Stalls = $script:stalls; Blips = $script:blips; Verdict = $verdict }
+    foreach ($n in $Names) { $t = $script:total[$n]; if ($t.Sent -gt 0) { $entry["${n}LossPct"] = [math]::Round(100 * $t.Lost / $t.Sent, 2) } }
+    Write-SessionLog -Path $LogPath -Entry $entry
     $notify.ShowBalloonTip(6000, 'Remote Play closed', $verdict, 'Info')
 }
 
@@ -224,13 +237,19 @@ function Test-FreezeNow {
     if (-not $frozen -or ((Get-Date) - $script:lastEvent).TotalSeconds -lt 10) { return }
     $script:lastEvent = Get-Date
     $cause = Get-Cause -Rssi $script:rssi -Router $st['Router'] -Ps5 $st['Ps5'] -Internet $st['Internet']
-    $script:events += [pscustomobject]@{ Cause = $cause; Time = Get-Date }
-    $entry = @{ Event = 'freeze'; Cause = $cause; Rssi = $script:rssi }
+    $sev = 'BLIP'
+    foreach ($n in @('Router', 'Ps5')) { if ((Get-Severity $st[$n]) -eq 'STALL') { $sev = 'STALL' } }
+    $script:events += [pscustomobject]@{ Cause = $cause; Severity = $sev; Time = Get-Date }
+    if ($sev -eq 'STALL') { $script:stalls++ } else { $script:blips++ }
+    $entry = @{ Event = 'freeze'; Cause = $cause; Severity = $sev; Rssi = $script:rssi }
     foreach ($n in $Names) { if ($st[$n]) { $entry["${n}Jitter"] = [math]::Round($st[$n].Jitter, 1); $entry["${n}Loss"] = [math]::Round($st[$n].Loss, 3) } }
     Write-SessionLog -Path $LogPath -Entry $entry
-    $script:freezeText = "Freeze at $((Get-Date).ToString('HH:mm:ss')): $cause"
-    $script:freezeUntil = (Get-Date).AddSeconds(10)
-    $notify.ShowBalloonTip(4000, 'Connection freeze', $script:freezeText, 'Warning')
+    # Only real stalls raise the red banner and a balloon; minor blips are logged and counted quietly.
+    if ($sev -eq 'STALL') {
+        $script:freezeText = "Stall at $((Get-Date).ToString('HH:mm:ss')): $cause"
+        $script:freezeUntil = (Get-Date).AddSeconds(10)
+        $notify.ShowBalloonTip(4000, 'Connection stall', $script:freezeText, 'Warning')
+    }
 }
 
 # fast loop: probes + display (200 ms)
@@ -254,6 +273,20 @@ $probeTimer.Add_Tick({
     if ($script:ticks % 50 -eq 0) { $g = Get-GatewayIp; if ($g) { $script:addr['Router'] = $g } }
     foreach ($n in $Names) { Format-Stat $n }
     $ui['Rssi'].Text = if ($null -ne $script:rssi) { "$($script:rssi) dBm" + $(if ($script:rssi -lt -70) { '  (weak)' } else { '' }) } else { 'n/a' }
+    # live link grade from running totals (needs ~30 s of samples)
+    $parts = @(); $worst = 'GOOD'
+    foreach ($n in @('Router', 'Ps5')) {
+        if (-not $script:addr[$n]) { continue }
+        $t = $script:total[$n]
+        $gr = Get-LinkGrade -Sent $t.Sent -Lost $t.Lost
+        if ($gr) {
+            $parts += ('{0}: {1} ({2:P1} lost)' -f $n, $gr, ($t.Lost / $t.Sent))
+            if ($n -eq 'Ps5' -and $gr -ne 'GOOD') { $worst = $gr }
+        }
+    }
+    $ui['Grade'].Text = if ($parts.Count) { $parts -join '   ' } else { 'measuring...' }
+    $ui['Grade'].ForeColor = if ($worst -eq 'POOR') { [System.Drawing.Color]::Firebrick } else { [System.Drawing.SystemColors]::ControlText }
+    $script:tip = if ($worst -ne 'GOOD') { 'Tip: PS5 link is ' + $worst.ToLower() + '. Cable the PS5, set it to 5 GHz, or use 720p / Standard in Remote Play.' } else { '' }
     Test-FreezeNow
     Update-Status
 })
@@ -293,7 +326,7 @@ $form.Add_FormClosing({ $probeTimer.Stop(); $watchTimer.Stop(); Invoke-TunerReve
 if ($SmokeSeconds -gt 0) {
     $smoke = New-Object System.Windows.Forms.Timer
     $smoke.Interval = $SmokeSeconds * 1000
-    $smoke.Add_Tick({ $smoke.Stop(); $form.Close() })
+    $smoke.Add_Tick({ $smoke.Stop(); $script:smokeGrade = $ui['Grade'].Text; $form.Close() })
     $smoke.Start()
 }
 
@@ -307,5 +340,5 @@ try {
 }
 
 if ($SmokeSeconds -gt 0) {
-    "SMOKE ticks=$($script:ticks) router=$($script:samples['Router']) internet=$($script:samples['Internet']) rssi=$($script:rssi) dirty=$(Test-TunerDirty)"
+    "SMOKE ticks=$($script:ticks) router=$($script:samples['Router']) internet=$($script:samples['Internet']) rssi=$($script:rssi) dirty=$(Test-TunerDirty) grade='$($script:smokeGrade)' total_router=$($script:total['Router'].Sent)/$($script:total['Router'].Lost)"
 }

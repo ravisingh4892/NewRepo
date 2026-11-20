@@ -64,6 +64,43 @@ Describe 'Get-Cause' {
     }
 }
 
+Describe 'Get-Severity' {
+    It 'is null when nothing is wrong' { Get-Severity -Stats (New-Stats 5 0) | Should Be $null }
+    It 'is BLIP for a couple of lost pings' { Get-Severity -Stats (New-Stats 8 0.08) | Should Be 'BLIP' }
+    It 'is BLIP for moderate jitter' { Get-Severity -Stats (New-Stats 31 0) | Should Be 'BLIP' }
+    It 'is STALL for heavy loss' { Get-Severity -Stats (New-Stats 0 0.24) | Should Be 'STALL' }
+    It 'is STALL for very high jitter' { Get-Severity -Stats (New-Stats 75 0) | Should Be 'STALL' }
+    It 'is null for unmeasured' { Get-Severity -Stats $null | Should Be $null }
+}
+
+Describe 'Get-LinkGrade' {
+    It 'needs enough samples before grading' { Get-LinkGrade -Sent 50 -Lost 0 | Should Be $null }
+    It 'is GOOD under 0.5% loss' { Get-LinkGrade -Sent 1000 -Lost 2 | Should Be 'GOOD' }
+    It 'is MARGINAL from 0.5% to under 2%' { Get-LinkGrade -Sent 1000 -Lost 8 | Should Be 'MARGINAL' }
+    It 'is POOR at 2% or more' { Get-LinkGrade -Sent 1000 -Lost 30 | Should Be 'POOR' }
+}
+
+Describe 'Get-Verdict stalls and blips' {
+    It 'separates stalls from blips and gives PS5-specific fixes' {
+        $ev = @([pscustomobject]@{ Cause = 'PS5-LINK'; Severity = 'STALL' },
+            [pscustomobject]@{ Cause = 'PS5-LINK'; Severity = 'BLIP' }, [pscustomobject]@{ Cause = 'PS5-LINK'; Severity = 'BLIP' })
+        $v = Get-Verdict -Events $ev
+        $v | Should Match '1 stall'
+        $v | Should Match '2 minor'
+        $v | Should Match '5 GHz'
+        $v | Should Match '720p'
+    }
+    It 'does not let many blips outvote the cause of a real stall' {
+        $ev = @(1..5 | ForEach-Object { [pscustomobject]@{ Cause = 'PC-WIFI-WEAK'; Severity = 'BLIP' } }) +
+            @([pscustomobject]@{ Cause = 'PS5-LINK'; Severity = 'STALL' })
+        Get-Verdict -Events $ev | Should Match 'PS5'
+    }
+    It 'says there were no real stalls when only blips happened' {
+        $ev = @([pscustomobject]@{ Cause = 'PS5-LINK'; Severity = 'BLIP' })
+        Get-Verdict -Events $ev | Should Match 'no real stalls'
+    }
+}
+
 Describe 'Get-Verdict' {
     It 'says so when there were no freezes' {
         Get-Verdict -Events @() | Should Match 'No freezes recorded'
