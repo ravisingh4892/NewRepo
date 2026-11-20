@@ -229,5 +229,50 @@ function Invoke-TunerRevert {
 
 function Test-TunerDirty { Test-Path (Get-StatePath) }
 
+# ---------- Probes and logging (Task 3) ----------
+
+function ConvertFrom-NetshWlan {
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Text)
+    $m = [regex]::Match((@($Text) -join "`n"), '(?m)^\s*Rssi\s*:\s*(-?\d+)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return $null
+}
+
+function Get-WifiRssi {
+    try { ConvertFrom-NetshWlan -Text @(netsh wlan show interfaces) } catch { $null }
+}
+
+function Get-GatewayIp {
+    $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+        Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } |
+        Sort-Object RouteMetric | Select-Object -First 1
+    if ($r) { return [string]$r.NextHop }
+    return $null
+}
+
+function Send-Probe {
+    param([string]$Target, [int]$TimeoutMs = 150)
+    $ping = New-Object System.Net.NetworkInformation.Ping
+    try {
+        $reply = $ping.Send($Target, $TimeoutMs)
+        if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) { return [double]$reply.RoundtripTime }
+        return $null
+    } catch {
+        return $null
+    } finally {
+        $ping.Dispose()
+    }
+}
+
+function Write-SessionLog {
+    param([string]$Path, [hashtable]$Entry)
+    $dir = Split-Path $Path
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $e = [ordered]@{ Time = (Get-Date).ToString('o') }
+    foreach ($k in $Entry.Keys) { $e[$k] = $Entry[$k] }
+    ($e | ConvertTo-Json -Compress) | Add-Content -Path $Path -Encoding UTF8
+}
+
 Export-ModuleMember -Function Get-WindowStats, Test-Freeze, Get-Cause, Get-Verdict,
-    Get-StatePath, Test-IsAdmin, ConvertFrom-PowercfgQuery, Invoke-TunerApply, Invoke-TunerRevert, Test-TunerDirty
+    Get-StatePath, Test-IsAdmin, ConvertFrom-PowercfgQuery, Invoke-TunerApply, Invoke-TunerRevert, Test-TunerDirty,
+    ConvertFrom-NetshWlan, Get-WifiRssi, Get-GatewayIp, Send-Probe, Write-SessionLog
