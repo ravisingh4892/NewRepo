@@ -16,6 +16,16 @@ $WindowSize = 25      # 5 s of samples at 200 ms
 $MinSamples = 15
 $AllActions = @('PowerSaving', 'ProcessPriority', 'PauseHogs', 'Qos')
 
+# ---------- single instance: a second copy would revert the first one's live tuning ----------
+$script:mutex = New-Object System.Threading.Mutex($false, 'Local\RemotePlayStabilizerSingleton')
+$owned = $false
+try { $owned = $script:mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+if (-not $owned) {
+    if ($SmokeSeconds -gt 0) { 'ALREADY RUNNING'; exit 1 }
+    [void][System.Windows.Forms.MessageBox]::Show('Remote Play Stabilizer is already running (check the tray icon).', 'Remote Play Stabilizer')
+    exit 0
+}
+
 # ---------- startup: clean up after a crash, then ask for consent once ----------
 if (Test-TunerDirty) { Invoke-TunerRevert }
 
@@ -35,7 +45,8 @@ if (-not $Consented -and $SmokeSeconds -eq 0) {
         $a = [System.Windows.Forms.MessageBox]::Show($msg, 'Remote Play Stabilizer', 'YesNoCancel', 'Information')
         if ($a -eq 'Cancel') { exit 0 }
         if ($a -eq 'Yes') {
-            Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Consented'
+            $script:mutex.ReleaseMutex(); $script:mutex.Dispose()   # let the elevated copy take the lock
+            Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$PSCommandPath`"", '-Consented'
             exit 0
         }
     }
@@ -206,8 +217,10 @@ function Test-FreezeNow {
     if (-not $script:session) { return }
     $st = @{}
     foreach ($n in $Names) { $st[$n] = Get-Stats $n }
-    $frozen = $false
-    foreach ($n in $Names) { if ($st[$n] -and (Test-Freeze $st[$n])) { $frozen = $true } }
+    # A PS5 that never replies is unreachable or mistyped, not a freeze. Remote Play does not use the internet, so an
+    # internet-only blip is shown but does not trigger a freeze either.
+    if ($st['Ps5'] -and $st['Ps5'].Loss -ge 1) { $st['Ps5'] = $null }
+    $frozen = (Test-Freeze $st['Router']) -or (Test-Freeze $st['Ps5'])
     if (-not $frozen -or ((Get-Date) - $script:lastEvent).TotalSeconds -lt 10) { return }
     $script:lastEvent = Get-Date
     $cause = Get-Cause -Rssi $script:rssi -Router $st['Router'] -Ps5 $st['Ps5'] -Internet $st['Internet']
@@ -254,9 +267,12 @@ $watchTimer.Add_Tick({
     $running = @(Get-Process -Name RemotePlay -ErrorAction SilentlyContinue).Count -gt 0
     if ($running -and -not $script:session) { Start-Session }
     elseif (-not $running -and $script:session) { Stop-Session }
-    if ($running -and -not $script:addr['Ps5'] -and $script:watchTicks % 5 -eq 0) {
+    # Detect the PS5 when unset, and re-detect when the saved address never answers (DHCP change, typo).
+    $ps5 = Get-Stats 'Ps5'
+    $ps5Dead = $ps5 -and $ps5.Loss -ge 1
+    if ($running -and (-not $script:addr['Ps5'] -or $ps5Dead) -and $script:watchTicks % 5 -eq 0) {
         $ip = Find-Ps5Ip
-        if ($ip) { $txtIp.Text = $ip; Set-Ps5Address $ip }
+        if ($ip -and $ip -ne $script:addr['Ps5']) { $txtIp.Text = $ip; Set-Ps5Address $ip }
     }
 })
 
@@ -287,6 +303,7 @@ try {
 } finally {
     Invoke-TunerRevert
     $notify.Visible = $false; $notify.Dispose()
+    try { $script:mutex.ReleaseMutex(); $script:mutex.Dispose() } catch { }
 }
 
 if ($SmokeSeconds -gt 0) {

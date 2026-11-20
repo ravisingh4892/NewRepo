@@ -27,7 +27,8 @@ Describe 'Get-WindowStats' {
 
 Describe 'Test-Freeze' {
     It 'fires above the jitter threshold' { Test-Freeze -Stats (New-Stats 31 0) | Should Be $true }
-    It 'fires above the loss threshold' { Test-Freeze -Stats (New-Stats 0 0.03) | Should Be $true }
+    It 'fires above the loss threshold' { Test-Freeze -Stats (New-Stats 0 0.08) | Should Be $true }
+    It 'ignores a single lost sample' { Test-Freeze -Stats (New-Stats 0 0.04) | Should Be $false }
     It 'does not fire at the thresholds' { Test-Freeze -Stats (New-Stats 30 0.02) | Should Be $false }
 }
 
@@ -39,6 +40,12 @@ Describe 'Get-Cause' {
     }
     It 'blames the PC link when the router probe is bad' {
         Get-Cause -Rssi -50 -Router $bad -Ps5 $ok -Internet $ok | Should Be 'PC-WIFI-WEAK'
+    }
+    It 'blames the PS5 even when the PC signal is weak but the router is clean' {
+        Get-Cause -Rssi -74 -Router $ok -Ps5 $bad -Internet $ok | Should Be 'PS5-LINK'
+    }
+    It 'blames router or internet even when the PC signal is weak' {
+        Get-Cause -Rssi -74 -Router $ok -Ps5 $ok -Internet $bad | Should Be 'ROUTER-OR-INTERNET'
     }
     It 'blames the PS5 link' {
         Get-Cause -Rssi -50 -Router $ok -Ps5 $bad -Internet $ok | Should Be 'PS5-LINK'

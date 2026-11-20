@@ -23,14 +23,18 @@ function Get-WindowStats {
 function Test-Freeze {
     param($Stats)
     if ($null -eq $Stats) { return $false }
-    return ($Stats.Jitter -gt 30 -or $Stats.Loss -gt 0.02)
+    # Loss must exceed 2% AND be at least 2 lost samples: with a 25-sample window one stray drop is already 4%.
+    $lost = [math]::Round($Stats.Loss * $Stats.Count)
+    return ($Stats.Jitter -gt 30 -or ($Stats.Loss -gt 0.02 -and $lost -ge 2))
 }
 
 function Get-Cause {
     param([Nullable[int]]$Rssi, $Router, $Ps5, $Internet)
-    if (($null -ne $Rssi -and $Rssi -lt -70) -or (Test-Freeze $Router)) { return 'PC-WIFI-WEAK' }
+    # The PS5 and internet probes also cross the PC's Wi-Fi, so a clean router probe clears the PC link.
+    if (Test-Freeze $Router) { return 'PC-WIFI-WEAK' }
     if (Test-Freeze $Ps5) { return 'PS5-LINK' }
     if (Test-Freeze $Internet) { return 'ROUTER-OR-INTERNET' }
+    if ($null -ne $Rssi -and $Rssi -lt -70) { return 'PC-WIFI-WEAK' }
     return 'UNKNOWN'
 }
 
@@ -218,11 +222,16 @@ function Invoke-TunerRevert {
     $path = Get-StatePath
     $state = Read-State
     if ($null -ne $state) {
+        $admin = Test-IsAdmin
+        $kept = @{}
         foreach ($a in @($state.Keys)) {
             $t = $script:Tunes[$a]
             if ($null -eq $t) { continue }
-            try { & $t.Undo $state[$a] } catch { Write-Warning "Could not revert ${a}: $_" }
+            # Admin-only changes cannot be undone without admin: keep their record for a later elevated run.
+            if (($script:AdminOnly -contains $a) -and -not $admin) { $kept[$a] = $state[$a]; continue }
+            try { & $t.Undo $state[$a] } catch { Write-Warning "Could not revert ${a}: $_"; $kept[$a] = $state[$a] }
         }
+        if ($kept.Count -gt 0) { Save-State $kept; return }
     }
     if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
 }

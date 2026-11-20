@@ -23,10 +23,10 @@ Everything is restored when Remote Play closes, when you press **Revert all**, o
 
 ## What it measures
 
-Every 200 ms it pings your router, your PS5 and the internet (1.1.1.1), and reads your Wi-Fi signal. A **freeze** is jitter over 30 ms or loss over 2% across 5 seconds. Each freeze is logged to `%LOCALAPPDATA%\RemotePlayStabilizer\sessions\` with a likely cause:
+Every 200 ms it pings your router, your PS5 and the internet (1.1.1.1), and reads your Wi-Fi signal. A **freeze** is jitter over 30 ms, or loss over 2% with at least 2 lost pings, across 5 seconds, on the router or PS5 probe. (A PS5 that never replies is treated as unreachable, not as a freeze, and the tool re-detects its address. Internet blips are shown but never trigger a freeze, because Remote Play does not use the internet.) Each freeze is logged to `%LOCALAPPDATA%\RemotePlayStabilizer\sessions\` with a likely cause:
 
-- `PC-WIFI-WEAK`: your PC's signal is below -70 dBm, or the router itself is lossy.
-- `PS5-LINK`: the PC link is fine but the PS5 is lossy or jittery.
+- `PC-WIFI-WEAK`: the router probe itself is bad (so your PC's link is the problem), or nothing is measurably bad but your signal is below -70 dBm.
+- `PS5-LINK`: the router probe is clean but the PS5 probe is bad. The PS5 and internet probes cross your PC's Wi-Fi too, so a clean router probe clears the PC link.
 - `ROUTER-OR-INTERNET`: only the internet probe is bad.
 
 When Remote Play closes you get a plain-language verdict (also under **Show verdict**).

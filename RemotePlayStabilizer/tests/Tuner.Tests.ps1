@@ -9,12 +9,14 @@ function Reset-Fakes {
     $global:FakeRP = [pscustomobject]@{ Id = 111; Name = 'RemotePlay'; PriorityClass = 'Normal' }
     $global:FakeHog = [pscustomobject]@{ Id = 222; Name = 'OneDrive'; PriorityClass = 'Normal' }
     $global:RpRunning = $true
+    $global:IsAdminFake = $true
+    $global:PowerFail = $false
 }
 
 Describe 'Tuner apply and revert' {
-Mock -ModuleName Stabilizer Test-IsAdmin { $true }
+Mock -ModuleName Stabilizer Test-IsAdmin { $global:IsAdminFake }
 Mock -ModuleName Stabilizer Get-WifiPowerSaving { @{ Scheme = 'scheme-1'; Ac = 3; Dc = 2 } }
-Mock -ModuleName Stabilizer Set-WifiPowerSaving { }
+Mock -ModuleName Stabilizer Set-WifiPowerSaving { if ($global:PowerFail) { throw 'powercfg failed' } }
 Mock -ModuleName Stabilizer Get-Service { [pscustomobject]@{ Status = 'Running' } }
 Mock -ModuleName Stabilizer Stop-Service { }
 Mock -ModuleName Stabilizer Start-Service { }
@@ -56,6 +58,35 @@ Mock -ModuleName Stabilizer Get-Process { $global:FakeHog } -ParameterFilter { $
         ConvertFrom-PowercfgQuery -Text @('nothing useful') | Should Be $null
     }
 
+    It 'keeps admin-only records when reverting without admin, and clears them once admin' {
+        Reset-Fakes
+        Invoke-TunerApply -Actions $global:AllActions | Out-Null
+        $global:IsAdminFake = $false
+        Invoke-TunerRevert
+        Test-TunerDirty | Should Be $true
+        Assert-MockCalled -ModuleName Stabilizer Start-Service -Times 0 -Scope It
+        Assert-MockCalled -ModuleName Stabilizer Remove-NetQosPolicy -Times 0 -Scope It
+        $global:FakeRP.PriorityClass | Should Be 'Normal'
+        $global:IsAdminFake = $true
+        Invoke-TunerRevert
+        Test-TunerDirty | Should Be $false
+        Assert-MockCalled -ModuleName Stabilizer Remove-NetQosPolicy -Times 1 -Scope It
+        Assert-MockCalled -ModuleName Stabilizer Start-Service -Times 1 -Scope It
+        $global:FakeHog.PriorityClass | Should Be 'Normal'
+    }
+
+    It 'keeps a record whose undo failed, so a later revert can retry' {
+        Reset-Fakes
+        Invoke-TunerApply -Actions @('PowerSaving') | Out-Null
+        $global:PowerFail = $true
+        Invoke-TunerRevert 3>$null
+        Test-TunerDirty | Should Be $true
+        $global:PowerFail = $false
+        Invoke-TunerRevert
+        Test-TunerDirty | Should Be $false
+        Assert-MockCalled -ModuleName Stabilizer Set-WifiPowerSaving -Times 1 -ParameterFilter { $Ac -eq 3 -and $Dc -eq 2 }
+    }
+
     It 'revert is a no-op the second time' {
         Reset-Fakes
         Invoke-TunerApply -Actions $global:AllActions | Out-Null
@@ -66,13 +97,12 @@ Mock -ModuleName Stabilizer Get-Process { $global:FakeHog } -ParameterFilter { $
 
     It 'skips admin-only actions when not elevated but still raises priority' {
         Reset-Fakes
-        Mock -ModuleName Stabilizer Test-IsAdmin { $false }
+        $global:IsAdminFake = $false
         $r = Invoke-TunerApply -Actions $global:AllActions
         (@($r.Skipped) | Sort-Object) -join ',' | Should Be 'PauseHogs,PowerSaving,Qos'
         (@($r.Applied)) -join ',' | Should Be 'ProcessPriority'
         $global:FakeRP.PriorityClass | Should Be 'High'
         Invoke-TunerRevert
-        Mock -ModuleName Stabilizer Test-IsAdmin { $true }
     }
 
     It 'keeps the original previous values when applied twice' {
